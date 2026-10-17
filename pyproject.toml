@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "valutatrade-hub"
+version = "0.1.0"
+description = "Platform for tracking and simulating currency trading"
+# readme удалён — теперь сборка не требует README.md
+requires-python = ">=3.11"
+
+[project.scripts]
+valutatrade = "valutatrade_hub.cli.interface:main"
+
+[tool.hatch.build]
+targets = { wheel = {} }

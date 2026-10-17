@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.egg-info/
+build/
+dist/
+*.whl
+.ruff_cache/
+.pytest_cache/
+wallet.json
+.current_session.json
+data/
+uv.lock
