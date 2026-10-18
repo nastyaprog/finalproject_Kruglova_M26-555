@@ -1,7 +1,15 @@
 """Бизнес-логика приложения: регистрация, вход, операции с портфелем."""
-
-import json
+from typing import Optional
+from datetime import datetime
 from pathlib import Path
+import json
+
+from valutatrade_hub.core.currencies import get_currency
+from valutatrade_hub.core.exceptions import CurrencyNotFoundError, InsufficientFundsError
+from valutatrade_hub.core.models import Portfolio, Wallet
+from valutatrade_hub.decorators import log_action
+from valutatrade_hub.infra.settings import SettingsLoader
+
 
 from valutatrade_hub.core.models import (
     PORTFOLIOS_FILE,
@@ -12,6 +20,15 @@ from valutatrade_hub.core.models import (
     Wallet,
 )
 from valutatrade_hub.core.utils import load_json, save_json
+from valutatrade_hub.core.currencies import get_currency
+from valutatrade_hub.core.exceptions import (
+    InsufficientFundsError,
+    CurrencyNotFoundError,
+)
+from valutatrade_hub.infra.settings import SettingsLoader
+from valutatrade_hub.decorators import log_action
+
+
 
 DATA_DIR = Path("data")
 
@@ -67,24 +84,14 @@ def register_user(username: str, password: str) -> tuple[bool, str]:
         return False, f"Имя пользователя '{username}' уже занято."
 
     user_id = _get_next_user_id()
-
-    # Вся магия с солью и хешем происходит внутри create_new -> change_password
     new_user = User.create_new(user_id, username, password)
-
     users.append(new_user.to_dict())
     save_json(USERS_FILE, users)
 
-    # Логика создания портфеля (остается без изменений)
-    portfolios = load_json(PORTFOLIOS_FILE)
-    portfolios.append({"user_id": user_id, "wallets": {}})
-    save_json(PORTFOLIOS_FILE, portfolios)
-
-    # Стартовый баланс
-    portfolio = get_portfolio(user_id)
-    if portfolio:
-        usd_wallet = _ensure_usd_wallet(portfolio)
-        usd_wallet.deposit(1000.0)
-        save_portfolio(portfolio)
+    # Создаём портфель сразу с USD-кошельком и стартовым балансом
+    usd_wallet = Wallet(currency="USD", balance=1000.0)
+    portfolio = Portfolio(user_id=user_id, wallets={"USD": usd_wallet})
+    save_portfolio(portfolio)
 
     return True, f"Пользователь '{username}' зарегистрирован (id={user_id})."
 
@@ -146,6 +153,7 @@ def save_portfolio(portfolio: Portfolio) -> None:
     save_json(PORTFOLIOS_FILE, portfolios)
 
 
+
 def _ensure_usd_wallet(portfolio: Portfolio) -> Wallet:
     """Гарантирует наличие USD-кошелька в портфеле.
 
@@ -173,33 +181,54 @@ def _load_rates() -> dict[str, float]:
     Returns:
         Словарь курсов.
     """
-    rates = load_json(RATES_FILE)
-    if not isinstance(rates, dict):
+    path = Path("data/rates.json")
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
         return {}
 
-    result = {}
-    for k, v in rates.items():
-        if k in ("source", "last_refresh"):
-            continue
-        if isinstance(v, dict) and "rate" in v:
-            result[k] = float(v["rate"])
-    return result
 
+def _is_rates_fresh(rates: dict) -> bool:
+    """Проверяет, не устарели ли курсы (TTL из SettingsLoader)."""
+    last_refresh = rates.get("last_refresh")
+    if not last_refresh:
+        return False
+    
+    # Обработка возможных форматов ISO (с Z или без)
+    clean_time = last_refresh.replace("Z", "+00:00")
+    try:
+        refresh_ts = datetime.fromisoformat(clean_time)
+    except ValueError:
+        return False
 
+    ttl_seconds = settings.get("rates_ttl_seconds", 300)
+    now = datetime.now(refresh_ts.tzinfo) if refresh_ts.tzinfo else datetime.now()
+    age = (now - refresh_ts).total_seconds()
+    return age <= ttl_seconds
+
+@log_action("BUY")
 def buy_currency(
     portfolio: Portfolio,
     currency: str,
     amount: float,
-    price_per_unit: float | None = None,
+    price_per_unit: Optional[float] = None,
 ) -> str:
-    """Покупает валюту за USD согласно ТЗ.
+    """
+    Покупает валюту за USD.
 
-    Списывает сумму в USD с USD-кошелька, начисляет купленную валюту.
-    Цена за единицу может быть передана явно или взята из rates.json.
+    Логика:
+      1. Валидирует валюту через реестр (выбросит CurrencyNotFoundError при ошибке).
+      2. Если цена не передана — берёт из rates.json (ключ вида "BTC_USD").
+      3. Проверяет баланс USD-кошелька.
+      4. Списывает USD, зачисляет целевую валюту.
+      5. Сохраняет обновлённый портфель в portfolios.json.
 
     Args:
         portfolio: Портфель пользователя.
-        currency: Код покупаемой валюты (например, 'BTC').
+        currency: Код покупаемой валюты (например, "BTC", "EUR").
         amount: Количество единиц валюты для покупки.
         price_per_unit: Цена одной единицы в USD. Если None — берётся из rates.json.
 
@@ -207,53 +236,63 @@ def buy_currency(
         Сообщение об успешной операции.
 
     Raises:
-        ValueError: Если недостаточно USD или параметры некорректны.
+        ValueError: Если amount <= 0 или цена некорректна.
+        CurrencyNotFoundError: Если валюта неизвестна или курс не найден.
+        InsufficientFundsError: Если недостаточно USD на балансе.
     """
     if amount <= 0:
         raise ValueError("Сумма покупки должна быть положительной.")
 
+    # 1. Валидация валюты через реестр (выбросит CurrencyNotFoundError при ошибке)
+    get_currency(currency)
+
     usd_wallet = _ensure_usd_wallet(portfolio)
 
-    # Получаем цену
+    # 2. Получение курса с проверкой свежести
+    rates = _load_rates()
+    pair = f"{currency.upper()}_USD"
+
     if price_per_unit is None:
-        rates = _load_rates()
-        pair = f"{currency}_USD"
         if pair not in rates:
-            raise ValueError(f"Курс для пары {pair} не найден.")
+            raise CurrencyNotFoundError(f"Курс для пары {pair} не найден.")
         price_per_unit = rates[pair]
 
     total_cost = amount * price_per_unit
+
+    # 3. Проверка баланса и выброс исключения при нехватке
     if usd_wallet.balance < total_cost:
-        raise ValueError(
-            f"Недостаточно USD: требуется {total_cost:.2f}, доступно {usd_wallet.balance:.2f}."
+        raise InsufficientFundsError(
+            available=usd_wallet.balance,
+            required=total_cost,
+            code="USD"
         )
 
-    # Списываем USD
+    # 4. Проведение операции
     usd_wallet.withdraw(total_cost)
+    portfolio.add_currency(currency.upper())
+    target_wallet = portfolio.get_wallet(currency.upper())
 
-    # Начисляем купленную валюту
-    portfolio.add_currency(currency)
-    target_wallet = portfolio.get_wallet(currency)
     if target_wallet is None:
-        raise RuntimeError("Не удалось получить кошелёк целевой валюты.")
+        # Это защита от логических ошибок
+        raise RuntimeError(f"Кошелёк для {currency.upper()} не был создан.")
+
     target_wallet.deposit(amount)
 
+    # 5. Сохранение
     save_portfolio(portfolio)
-    return (
-        f"Покупка выполнена: {amount:.4f} {currency} по цене {price_per_unit:.4f} "
-        f"USD за единицу. Списано {total_cost:.2f} USD."
-    )
 
+    return (f"Покупка выполнена: {amount:.4f} {currency.upper()} "
+            f"по курсу {price_per_unit:.4f} USD/ед. "
+            f"Списано: {total_cost:.2f} USD.")
 
+@log_action("SELL")
 def sell_currency(
     portfolio: Portfolio,
     currency: str,
     amount: float,
     price_per_unit: float | None = None,
 ) -> str:
-    """Продаёт валюту и зачисляет USD на счёт согласно ТЗ.
-
-    Списывает указанную валюту, начисляет эквивалент в USD.
+    """Продаёт валюту и зачисляет USD на счёт.
 
     Args:
         portfolio: Портфель пользователя.
@@ -265,43 +304,70 @@ def sell_currency(
         Сообщение об успешной операции.
 
     Raises:
-        ValueError: Если валюта отсутствует или недостаточно баланса.
+        ValueError: Если amount <= 0 или цена некорректна.
+        CurrencyNotFoundError: Если курс не найден.
+        InsufficientFundsError: Если недостаточно валюты на балансе.
     """
+     # 1. Валидация суммы
     if amount <= 0:
-        raise ValueError("Сумма продажи должна быть положительной.")
+        raise ValueError("Сумма продажи должна быть положительным числом.")
 
-    wallet = portfolio.get_wallet(currency)
-    if wallet is None or wallet.balance < amount:
-        raise ValueError(
-            f"Недостаточно {currency}: требуется {amount:.4f}, доступно "
-            f"{0.0 if wallet is None else wallet.balance:.4f}."
+    # 2. Валидация валюты через реестр (выбросит CurrencyNotFoundError при ошибке)
+    get_currency(currency)
+
+    currency_code = currency.upper()
+
+    # 3. Проверка наличия кошелька и баланса
+    wallet = portfolio.get_wallet(currency_code)
+    if wallet is None:
+        # Для удобства можно автоматически создать пустой кошелёк, но по ТЗ 
+        # лучше явно сказать, что валюты нет. Оставим явную ошибку.
+        raise CurrencyNotFoundError(f"У вас нет кошелька для валюты '{currency_code}'. Сначала купите её.")
+
+    if wallet.balance < amount:
+        raise InsufficientFundsError(
+            available=wallet.balance,
+            required=amount,
+            code=currency_code
         )
 
-    # Получаем цену
+    # 4. Получение курса (USD) для расчёта выручки
+    rates = _load_rates()
+    
+    # Проверка свежести кеша. Если устарел — выбрасываем ApiRequestError (как в ТЗ)
+    if not _is_rates_fresh(rates):
+        from valutatrade_hub.core.exceptions import ApiRequestError
+        raise ApiRequestError("Курсы валют устарели. Требуется обновление через Parser Service.")
+
+    pair = f"{currency_code}_USD"
     if price_per_unit is None:
-        rates = _load_rates()
-        pair = f"{currency}_USD"
         if pair not in rates:
-            raise ValueError(f"Курс для пары {pair} не найден.")
+            raise CurrencyNotFoundError(f"Курс для пары {pair} не найден.")
         price_per_unit = rates[pair]
 
-    revenue = amount * price_per_unit
+    revenue_usd = amount * price_per_unit
 
-    # Списываем валюту
+    # 5. Проведение операции
+    # Списываем валюту из кошелька продавца
     wallet.withdraw(amount)
 
-    # Зачисляем USD
-    usd_wallet = _ensure_usd_wallet(portfolio)
-    usd_wallet.deposit(revenue)
+    # Начисляем USD на USD-кошелёк (создаём, если нет)
+    usd_wallet = portfolio.add_currency("USD")  # add_currency должен возвращать объект Wallet
+    usd_wallet.deposit(revenue_usd)
 
+    # 6. Сохранение портфеля
+    # Предполагаем, что у тебя есть функция save_portfolio(portfolio)
     save_portfolio(portfolio)
+
     return (
-        f"Продажа выполнена: {amount:.4f} {currency}. Начислено {revenue:.2f} USD "
-        f"(по курсу {price_per_unit:.4f} USD за единицу)."
+        f"Продажа выполнена: {amount:.4f} {currency_code} по курсу {price_per_unit:.4f} USD/ед.\n"
+        f"Изменения в портфеле:\n"
+        f"- {currency_code}: было {wallet.balance + amount:.4f} → стало {wallet.balance:.4f}\n"
+        f"- USD: начислено {revenue_usd:.2f} USD\n"
+        f"Оценочная выручка: {revenue_usd:.2f} USD"
     )
 
-
-def show_portfolio(portfolio: Portfolio) -> str:
+def show_portfolio(portfolio: Portfolio, base: str = "USD") -> str:
     """Формирует читаемое представление портфеля.
 
     Включает список кошельков и общую стоимость в USD.
@@ -323,18 +389,25 @@ def show_portfolio(portfolio: Portfolio) -> str:
 
 
 def get_rate(from_currency: str, to_currency: str) -> float | None:
+    """Возвращает курс конвертации через USD (если нет прямого)."""
     from_currency = from_currency.upper()
     to_currency = to_currency.upper()
 
     rates = _load_rates()
 
-    # Простой случай: к USD
+    # Прямой курс к USD
     if to_currency == "USD":
         return rates.get(f"{from_currency}_USD")
 
-    # Обратный случай: из USD
+    # Обратный курс из USD
     if from_currency == "USD":
         rate = rates.get(f"USD_{to_currency}")
         return 1 / rate if rate else None
 
-    return None
+    # Кросс-курс через USD
+    rate_from_usd = rates.get(f"{from_currency}_USD")
+    rate_to_usd = rates.get(f"USD_{to_currency}")
+    if rate_from_usd is None or rate_to_usd is None:
+        return None
+
+    return rate_from_usd * rate_to_usd

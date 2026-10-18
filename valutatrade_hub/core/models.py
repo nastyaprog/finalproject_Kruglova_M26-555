@@ -186,14 +186,18 @@ class User:
 class Wallet:
     """Кошелёк для одной валюты: управляет балансом, пополнением и снятием."""
 
-    def __init__(self, currency_code: str, balance: float = 0.0) -> None:
+    def __init__(
+            self, 
+            currency: str, 
+            balance: float, 
+        ) -> None:
         """Инициализирует кошелёк с кодом валюты и начальным балансом.
 
         Args:
             currency_code: Код валюты (приводится к верхнему регистру).
             balance: Начальный баланс (по умолчанию 0.0).
         """
-        self.currency_code = currency_code.upper()
+        self.currency_code = currency.upper()
         self._balance = balance
 
     @property
@@ -274,7 +278,8 @@ class Wallet:
         Returns:
             Экземпляр Wallet.
         """
-        return cls(currency_code=data["currency_code"], balance=data["balance"])
+                # В JSON сохраняется currency_code, а не currency
+        return cls(currency=data["currency_code"], balance=data["balance"])
 
 
 class Portfolio:
@@ -305,7 +310,7 @@ class Portfolio:
         """
         return self._wallets.copy()
 
-    def add_currency(self, currency_code: str) -> None:
+    def add_currency(self, currency_code: str) -> Wallet:
         """Добавляет новую валюту в портфель, если её ещё нет.
 
         Args:
@@ -313,8 +318,11 @@ class Portfolio:
         """
         currency_code = currency_code.upper()
         if currency_code in self._wallets:
-            return
-        self._wallets[currency_code] = Wallet(currency_code=currency_code, balance=0.0)
+            return self._wallets[currency_code]  # возвращаем существующий
+
+        new_wallet = Wallet(currency=currency_code, balance=0.0)
+        self._wallets[currency_code] = new_wallet
+        return new_wallet  # <-- возвращаем объект
 
     def get_wallet(self, currency_code: str) -> Wallet | None:
         """Получает кошелёк по коду валюты.
