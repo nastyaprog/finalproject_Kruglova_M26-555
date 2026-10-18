@@ -17,3 +17,10 @@ logs/
 .idea/
 .vscode/
 .DS_Store
+.env
+logs/
+data/exchange_rates.json
+data/rates.json
+# Пользовательские состояния
+wallet.json
+.current_session.json

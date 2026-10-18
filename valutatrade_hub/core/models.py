@@ -189,7 +189,7 @@ class Wallet:
     def __init__(
             self, 
             currency: str, 
-            balance: float, 
+            balance: float = 0.0, 
         ) -> None:
         """Инициализирует кошелёк с кодом валюты и начальным балансом.
 
@@ -311,18 +311,22 @@ class Portfolio:
         return self._wallets.copy()
 
     def add_currency(self, currency_code: str) -> Wallet:
-        """Добавляет новую валюту в портфель, если её ещё нет.
-
-        Args:
-            currency_code: Код валюты.
-        """
+        """Добавляет новую валюту в портфель, если её ещё нет."""
+        # 1. Нормализуем регистр сразу
         currency_code = currency_code.upper()
+    
+        # 2. Если уже есть — возвращаем существующий
         if currency_code in self._wallets:
-            return self._wallets[currency_code]  # возвращаем существующий
+            return self._wallets[currency_code]
 
+        # 3. Создаём новый кошелёк: в параметр currency передаём значение из переменной currency_code
         new_wallet = Wallet(currency=currency_code, balance=0.0)
+    
+        # 4. Кладем в словарь по ключу currency_code (он уже в верхнем регистре)
         self._wallets[currency_code] = new_wallet
-        return new_wallet  # <-- возвращаем объект
+    
+        return new_wallet
+
 
     def get_wallet(self, currency_code: str) -> Wallet | None:
         """Получает кошелёк по коду валюты.
@@ -347,7 +351,8 @@ class Portfolio:
         Returns:
             Общая стоимость портфеля в указанной валюте.
         """
-        exchange_rates = {  # хаглушка: будет заменено с апи
+        exchange_rates = {  # это тестовые заглушки курсов для демонстрации логики.
+        # В реальном проекте курсы берутся из rates.json / Parser Service.
             "EUR_USD": 1.08,
             "BTC_USD": 60000.0,
             "RUB_USD": 0.011,

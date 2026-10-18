@@ -6,8 +6,11 @@ build-backend = "hatchling.build"
 name = "valutatrade-hub"
 version = "0.1.0"
 description = "Platform for tracking and simulating currency trading"
-# readme удалён — теперь сборка не требует README.md
 requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.31.0",
+  "python-dotenv>=1.0.0",
+]
 
 [project.scripts]
 valutatrade = "valutatrade_hub.cli.interface:main"

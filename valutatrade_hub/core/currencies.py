@@ -4,7 +4,8 @@
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Optional
+
+from valutatrade_hub.core.exceptions import CurrencyNotFoundError
 
 
 class Currency(ABC):
@@ -48,7 +49,6 @@ class Currency(ABC):
         Returns:
             Строковое представление валюты.
         """
-        pass
 
 
 class FiatCurrency(Currency):
@@ -121,7 +121,7 @@ class CryptoCurrency(Currency):
 
 
 # Реестр валют (можно вынести в отдельный файл конфигурации)
-_CURRENCIES: Dict[str, Currency] = {
+_CURRENCIES: dict[str, Currency] = {
     "USD": FiatCurrency("USD", "US Dollar", "United States"),
     "EUR": FiatCurrency("EUR", "Euro", "Eurozone"),
     "GBP": FiatCurrency("GBP", "British Pound", "United Kingdom"),

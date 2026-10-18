@@ -1,8 +1,7 @@
 """Декораторы для трассировки доменных операций."""
 
-from functools import wraps
 import logging
-from typing import Callable, Any
+from functools import wraps
 
 logger = logging.getLogger(__name__)
 

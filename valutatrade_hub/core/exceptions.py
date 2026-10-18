@@ -3,7 +3,6 @@
 
 class ValutaTradeError(Exception):
     """Базовый класс исключений проекта."""
-    pass
 
 
 class InsufficientFundsError(ValutaTradeError):

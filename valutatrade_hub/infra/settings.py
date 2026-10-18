@@ -1,7 +1,7 @@
 """Конфигурация проекта: Singleton SettingsLoader."""
-
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar, Optional, Self
 
 
 class SettingsLoader:
@@ -10,15 +10,15 @@ class SettingsLoader:
     _instance: Optional["SettingsLoader"] = None
 
     # Дефолтные значения (можно переопределить из файла/pyproject.toml)
-    _defaults: Dict[str, Any] = {
+    _defaults: ClassVar[dict[str, Any]] = {
         "data_dir": "data",
-        "rates_ttl_seconds": 3600,
+        "rates_ttl_seconds": 3600, #fallback
         "default_base_currency": "USD",
         "log_file": "logs/actions.log",
         "log_level": "INFO",
     }
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> "SettingsLoader":
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
         """Гарантирует существование только одного экземпляра класса."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
@@ -30,11 +30,27 @@ class SettingsLoader:
         """Ленивая инициализация конфигурации."""
         if getattr(self, "_initialized", False):
             return
-        self._config: Dict[str, Any] = self._defaults.copy()
+        self._config: dict[str, Any] = self._defaults.copy()
         self._initialized = True
-        # Здесь можно добавить загрузку из pyproject.toml или config.json
-        # self._load_from_pyproject()
-        # self._load_from_config_json()
+
+        # загрузка из .env с приоритетом над дефолтами ---
+        # rates_ttl_seconds
+        ttl_env = os.getenv("RATES_TTL_SECONDS")
+        if ttl_env is not None:
+            try:
+                self._config["rates_ttl_seconds"] = int(ttl_env)
+            except ValueError:
+                pass  # fallback на дефолт, если в .env мусор
+
+        # data_dir
+        data_dir_env = os.getenv("DATA_DIR")
+        if data_dir_env:
+            self._config["data_dir"] = data_dir_env
+
+        # log_file
+        log_file_env = os.getenv("LOG_FILE")
+        if log_file_env:
+            self._config["log_file"] = log_file_env
 
     def get(self, key: str, default: Any = None) -> Any:
         """
@@ -62,7 +78,6 @@ class SettingsLoader:
     def reload(self) -> None:
         """Перезагружает конфигурацию (заглушка)."""
         # В будущем: повторная загрузка из файлов/pyproject.toml
-        pass
 
     @property
     def data_dir(self) -> Path:

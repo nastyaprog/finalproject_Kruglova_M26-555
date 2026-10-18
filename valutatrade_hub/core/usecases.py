@@ -1,34 +1,26 @@
 """Бизнес-логика приложения: регистрация, вход, операции с портфелем."""
-from typing import Optional
+import json
 from datetime import datetime
 from pathlib import Path
-import json
 
 from valutatrade_hub.core.currencies import get_currency
-from valutatrade_hub.core.exceptions import CurrencyNotFoundError, InsufficientFundsError
-from valutatrade_hub.core.models import Portfolio, Wallet
-from valutatrade_hub.decorators import log_action
-from valutatrade_hub.infra.settings import SettingsLoader
-
-
+from valutatrade_hub.core.exceptions import (
+    CurrencyNotFoundError,
+    InsufficientFundsError,
+)
 from valutatrade_hub.core.models import (
     PORTFOLIOS_FILE,
-    RATES_FILE,
     USERS_FILE,
     Portfolio,
     User,
     Wallet,
 )
 from valutatrade_hub.core.utils import load_json, save_json
-from valutatrade_hub.core.currencies import get_currency
-from valutatrade_hub.core.exceptions import (
-    InsufficientFundsError,
-    CurrencyNotFoundError,
-)
-from valutatrade_hub.infra.settings import SettingsLoader
 from valutatrade_hub.decorators import log_action
+from valutatrade_hub.infra.settings import SettingsLoader
 
-
+# Создаём единственный экземпляр настроек (Singleton)
+settings = SettingsLoader()
 
 DATA_DIR = Path("data")
 
@@ -75,7 +67,15 @@ def _get_next_user_id() -> int:
 
 
 def register_user(username: str, password: str) -> tuple[bool, str]:
-    """Регистрирует нового пользователя в системе."""
+    """Регистрирует нового пользователя в системе.
+
+    Args:
+        username: Имя пользователя.
+        password: Пароль (длина >= 4 символов).
+
+    Returns:
+        Кортеж (успех, сообщение).
+    """
     if len(password) < 4:
         return False, "Пароль должен быть не короче 4 символов."
 
@@ -173,13 +173,17 @@ def _ensure_usd_wallet(portfolio: Portfolio) -> Wallet:
     return wallet
 
 
-def _load_rates() -> dict[str, float]:
+def _load_rates() -> dict:
     """Загружает курсы валют из rates.json.
 
-    Возвращает плоский словарь: ключ 'EUR_USD' -> значение rate.
+    Возвращает полный JSON-объект:
+    {
+      "pairs": { "BTC_USD": { "rate": ..., "updated_at": ... } },
+      "last_refresh": "..."
+    }
 
     Returns:
-        Словарь курсов.
+        Словарь с данными курсов.
     """
     path = Path("data/rates.json")
     if not path.exists():
@@ -192,7 +196,14 @@ def _load_rates() -> dict[str, float]:
 
 
 def _is_rates_fresh(rates: dict) -> bool:
-    """Проверяет, не устарели ли курсы (TTL из SettingsLoader)."""
+    """Проверяет, не устарели ли курсы (TTL из SettingsLoader).
+
+    Args:
+        rates: Данные курсов.
+
+    Returns:
+        True, если курсы свежие.
+    """
     last_refresh = rates.get("last_refresh")
     if not last_refresh:
         return False
@@ -204,7 +215,7 @@ def _is_rates_fresh(rates: dict) -> bool:
     except ValueError:
         return False
 
-    ttl_seconds = settings.get("rates_ttl_seconds", 300)
+    ttl_seconds = settings.get("rates_ttl_seconds")
     now = datetime.now(refresh_ts.tzinfo) if refresh_ts.tzinfo else datetime.now()
     age = (now - refresh_ts).total_seconds()
     return age <= ttl_seconds
@@ -214,7 +225,7 @@ def buy_currency(
     portfolio: Portfolio,
     currency: str,
     amount: float,
-    price_per_unit: Optional[float] = None,
+    price_per_unit: float | None = None,
 ) -> str:
     """
     Покупает валюту за USD.
@@ -249,13 +260,16 @@ def buy_currency(
     usd_wallet = _ensure_usd_wallet(portfolio)
 
     # 2. Получение курса с проверкой свежести
-    rates = _load_rates()
+    rates_data = _load_rates()
     pair = f"{currency.upper()}_USD"
 
+    # Достаём пары из ключа "pairs", если он есть
+    pairs = rates_data.get("pairs", {})
+
     if price_per_unit is None:
-        if pair not in rates:
+        if pair not in pairs:
             raise CurrencyNotFoundError(f"Курс для пары {pair} не найден.")
-        price_per_unit = rates[pair]
+        price_per_unit = pairs[pair]["rate"]
 
     total_cost = amount * price_per_unit
 
@@ -307,6 +321,7 @@ def sell_currency(
         ValueError: Если amount <= 0 или цена некорректна.
         CurrencyNotFoundError: Если курс не найден.
         InsufficientFundsError: Если недостаточно валюты на балансе.
+        ApiRequestError: Если курсы устарели.
     """
      # 1. Валидация суммы
     if amount <= 0:
@@ -331,19 +346,25 @@ def sell_currency(
             code=currency_code
         )
 
-    # 4. Получение курса (USD) для расчёта выручки
-    rates = _load_rates()
-    
-    # Проверка свежести кеша. Если устарел — выбрасываем ApiRequestError (как в ТЗ)
-    if not _is_rates_fresh(rates):
-        from valutatrade_hub.core.exceptions import ApiRequestError
-        raise ApiRequestError("Курсы валют устарели. Требуется обновление через Parser Service.")
+    rates_data = _load_rates()
 
+    # 4. Проверка свежести кеша
+    if not _is_rates_fresh(rates_data):
+        from valutatrade_hub.core.exceptions import ApiRequestError
+        raise ApiRequestError(
+            "Курсы валют устарели. Требуется обновление через Parser Service."
+            )
+
+    currency_code = currency.upper()
     pair = f"{currency_code}_USD"
+    
+    # Достаём пары
+    pairs = rates_data.get("pairs", {})
+
     if price_per_unit is None:
-        if pair not in rates:
+        if pair not in pairs:
             raise CurrencyNotFoundError(f"Курс для пары {pair} не найден.")
-        price_per_unit = rates[pair]
+        price_per_unit = pairs[pair]["rate"]
 
     revenue_usd = amount * price_per_unit
 
@@ -356,7 +377,6 @@ def sell_currency(
     usd_wallet.deposit(revenue_usd)
 
     # 6. Сохранение портфеля
-    # Предполагаем, что у тебя есть функция save_portfolio(portfolio)
     save_portfolio(portfolio)
 
     return (
@@ -370,10 +390,11 @@ def sell_currency(
 def show_portfolio(portfolio: Portfolio, base: str = "USD") -> str:
     """Формирует читаемое представление портфеля.
 
-    Включает список кошельков и общую стоимость в USD.
+    Включает список кошельков и общую стоимость в базовой валюте.
 
     Args:
         portfolio: Портфель пользователя.
+        base: Базовая валюта для конвертации (по умолчанию USD).
 
     Returns:
         Строка с информацией о портфеле.
@@ -389,7 +410,15 @@ def show_portfolio(portfolio: Portfolio, base: str = "USD") -> str:
 
 
 def get_rate(from_currency: str, to_currency: str) -> float | None:
-    """Возвращает курс конвертации через USD (если нет прямого)."""
+    """Возвращает курс конвертации через USD (если нет прямого).
+
+    Args:
+        from_currency: Валюта ОТ.
+        to_currency: Валюта ДО.
+
+    Returns:
+        Курс конвертации или None, если не найден.
+    """
     from_currency = from_currency.upper()
     to_currency = to_currency.upper()
 

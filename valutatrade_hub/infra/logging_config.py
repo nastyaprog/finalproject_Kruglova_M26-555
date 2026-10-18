@@ -1,7 +1,6 @@
 """Настройка логирования для ValutaTrade Hub."""
 
 import logging
-import os
 from pathlib import Path
 
 
@@ -20,8 +19,8 @@ def configure_logging(log_file: str = "logs/actions.log", level: str = "INFO") -
         filename=log_path,
         level=getattr(logging, level.upper(), logging.INFO),
         format=(
-            "%(asctime)s %(levelname)s "
-            "action=%(action)s user=%(user)s "
+            "%(asctime)s %(levelname)-8s "
+            "action=%(action)s "
             "message=%(message)s"
         ),
         datefmt="%Y-%m-%dT%H:%M:%S",
